@@ -17,7 +17,7 @@ from util import *
 import argparse
 import os 
 import os.path as osp
-from DNModel import net
+from yolov3 import net
 from img_process import preprocess_img, inp_to_image
 import pandas as pd
 import random 
