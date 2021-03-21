@@ -7,6 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from util import make_tup, bbox_wh_iou, bbox_xywh_ious
 
+# +++ custom activation functions
+
+
 # +++ global functions
 def get_activ(activation):
     ''' gets the activation function from the string provided.
@@ -27,7 +30,7 @@ def get_activ(activation):
     elif activation == 'sigmoid':
         act = nn.Sigmoid()
     elif activation == 'linear':
-        act = None
+        act = nn.Identity()
     return act
 
 # +++ network block classes
@@ -70,7 +73,9 @@ class DetBlock(nn.Module):
         
         # +++ initialize some variables
         # loss functions
-        self.mse_loss = nn.MSELoss(reduction='sum') # sum squared error loss function
+        # FIXME: add the ability to choose between MSE and SSE using kwarg
+        # FIXME: reduction='sum' (or 'mean'?)
+        self.mse_loss = nn.MSELoss(reduction=block_dict['loss_reduction']) # SUM/MEAN squared error loss function
         self.bce_loss = nn.BCELoss() # binary cross entropy loss function
         # loss scalings
         self.lambda_obj = block_dict['lambda_obj'] # loss scale for obj
@@ -130,7 +135,7 @@ class DetBlock(nn.Module):
         # +++ take a looksie at x's dimensions
         self.batch_size = x.size(0) # get the batch size
         grid_size = x.size(2) # get the grid size
-
+        
         # +++ reformat x to get predictions
             # essentially all we do here is breakup x's first dimension, which
             # is (num_classes+5) * num_anchors, into two dimensions of 
@@ -181,10 +186,10 @@ class DetBlock(nn.Module):
                 # that we don't care about/don't want to affect our loss
             
             ### bounding box loss
-            loss_x = self.mse_loss(x * obj_mask, tx * obj_mask)*self.lambda_bbox
-            loss_y = self.mse_loss(y * obj_mask, ty * obj_mask)*self.lambda_bbox
-            loss_w = self.mse_loss(w * obj_mask, tw * obj_mask)*self.lambda_bbox
-            loss_h = self.mse_loss(h * obj_mask, th * obj_mask)*self.lambda_bbox
+            loss_x = self.mse_loss(x * obj_mask, tx * obj_mask) * self.lambda_bbox
+            loss_y = self.mse_loss(y * obj_mask, ty * obj_mask) * self.lambda_bbox
+            loss_w = self.mse_loss(w * obj_mask, tw * obj_mask) * self.lambda_bbox
+            loss_h = self.mse_loss(h * obj_mask, th * obj_mask) * self.lambda_bbox
             loss_bbox = loss_x + loss_y + loss_w + loss_h # total bounding box loss
 
             ### confidence loss
@@ -199,10 +204,10 @@ class DetBlock(nn.Module):
             
             ### class loss
             # loss from class predictions where an object was present
+            
             loss_cls = self.bce_loss(cls_conf * obj_mask.unsqueeze(-1), 
                                      tcls * obj_mask.unsqueeze(-1))
             loss_cls *= self.lambda_cls
-
             # sum above to get total loss
             total_loss = loss_bbox + loss_conf + loss_cls
             
@@ -236,16 +241,16 @@ class DetBlock(nn.Module):
             
             # +++ save the metrics
             self.metrics = {
-                'loss': total_loss.cpu().item(),
-                'bbox-loss': loss_bbox.cpu().item(),
-                'conf-loss': loss_conf.cpu().item(),
-                'cls-loss': loss_cls.cpu().item(),
-                'cls-accuracy': cls_acc.cpu().item(),
-                'recall50': recall50.cpu().item(),
-                'recall75': recall75.cpu().item(),
-                'precision': precision.cpu().item(),
-                'conf-obj': conf_obj.cpu().item(),
-                'conf-noobj': conf_noobj.cpu().item(),
+                'loss': total_loss.item(),
+                'bbox-loss': loss_bbox.item(),
+                'conf-loss': loss_conf.item(),
+                'cls-loss': loss_cls.item(),
+                'cls-accuracy': cls_acc.item(),
+                'recall50': recall50.item(),
+                'recall75': recall75.item(),
+                'precision': precision.item(),
+                'conf-obj': conf_obj.item(),
+                'conf-noobj': conf_noobj.item(),
                 'grid-size': self.grid_size}
             
             # return the output and the loss
@@ -359,9 +364,7 @@ class ConvolutionalBlock(nn.Sequential):
 
     --- args ---
     block_dict : dict
-        the dictionary that describes this convolutional block. should contain
-        keys 'in_channels', 'filters', 'kernel_size', 'stride', 'padding', 
-        'activation', 'batch_normalize', and 'bias'.
+        the dictionary that describes this convolutional block.
     '''
     def __init__(self, block_dict):
         super(ConvolutionalBlock, self).__init__() # run super init
@@ -389,9 +392,8 @@ class ConvolutionalBlock(nn.Sequential):
             self.add_module('batch norm', batch_norm) # add it
         
         # add the activation function
-        activation = get_activ(block_dict['activation']) # get activation
-        if activation != None: # if it's an actual function
-            self.add_module(block_dict['activation'], activation) # add it
+        activation = get_activ(block_dict['activation'])
+        self.add_module(block_dict['activation'], activation)
 
 class FireBlock(nn.Module):
     ''' fire block
@@ -410,20 +412,26 @@ class FireBlock(nn.Module):
         fe = block_dict['fexpand']
         
         # make the layers of the module
-        self.squeeze = nn.Conv2d(in_chan, fs, 1)
+        self.squeeze = nn.Conv2d(in_chan, fs, kernel_size=1)
         self.expand1 = nn.Conv2d(fs, fe, 1)
         self.expand3 = nn.Conv2d(fs, fe, 3, padding=1)
 
+        # batch normalization
+        if block_dict['batch_normalize']:
+            self.batch_norm = nn.BatchNorm2d(fe * 2)
+        else:
+            self.batch_norm = None
+        
         # get the activation function to use
-        self.activ = get_activ(block_dict['activation']) # activation function
-        if self.activ == None: # if it was linear
-            self.activ = lambda x : x # make it just pass the value on
+        self.activ = get_activ(block_dict['activation'])
     
     def forward(self, x):
         s = self.activ(self.squeeze(x)) # squeeze x
         e1 = self.activ(self.expand1(s)) # expand 1
         e3 = self.activ(self.expand3(s)) # expand 3
-        output = torch.cat((e1, e3), dim=1)
+        output = torch.cat((e1, e3), dim=1) # concatenate expand layers
+        if self.batch_norm != None:
+            output = self.batch_norm(output)
         return output
 
 class MaxPoolBlock(nn.Module):
@@ -568,8 +576,8 @@ class DropBlock2D(nn.Module):
             the input to the layer.
         '''
         # +++ first, make sure we're training
-        if self.training == False: # if we're not training
-            return x # return x as is, DO NOTHING
+        if self.training == False: # if we're not training DO NOTHING
+            return x
 
         # +++ get info about the x tensor
         device = x.device
@@ -602,8 +610,7 @@ class DropBlock2D(nn.Module):
 
         return out
 
-        
-
+# +++ net blocks dictionary
 NET_BLOCKS = {
     'convolutional': ConvolutionalBlock,
     'fire': FireBlock,
