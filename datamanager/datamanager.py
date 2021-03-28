@@ -195,7 +195,9 @@ class DataManager(object):
         str : the name of the class.
         '''
         return self._classes[int(class_num)]
-
+##################################################################################
+################# things below this *probably* don't work ########################
+##################################################################################
     def write_boxes(self, imgs, boxes, img_labels=None, boxes_format=0, \
                     colorfile='colors.pt', rel_txt_h=0.02):
         ''' write boxes method
