@@ -6,8 +6,9 @@ import numpy as np
 import copy
 import random
 import matplotlib.pyplot as plt
-from .util import *
 import cv2
+from datamanager.util import *
+
 
 class DataManager(object):
     ''' data manager class
@@ -36,6 +37,7 @@ class DataManager(object):
     '''
     font = cv2.FONT_HERSHEY_SIMPLEX
     _columns = ['names','originals','dims','images','labels']
+    
     # +++ built in methods
     def __init__(self, path, input_dim, class_file=None, **data_aug):
         # save the inputs 
@@ -76,7 +78,7 @@ class DataManager(object):
         
     # +++ get methods
     def get_dims(self):
-        return torch.stack(self[2], dim=0)
+        return torch.stack(self['dims'], dim=0)
 
     def get_imgs(self, augmented=False):
         imgs = torch.stack(self[3], dim=0)
@@ -195,179 +197,175 @@ class DataManager(object):
         str : the name of the class.
         '''
         return self._classes[int(class_num)]
-##################################################################################
-################# things below this *probably* don't work ########################
-##################################################################################
-    def write_boxes(self, imgs, boxes, img_labels=None, boxes_format=0, \
+
+    def write_boxes(self, boxes, images=None, img_labels=None,
                     colorfile='colors.pt', rel_txt_h=0.02):
         ''' write boxes method
-        --- args ---
-        imgs : list[numpy.ndarray]
-            the set of images that are having boxes written onto them. the 
-            images should be formatted exactly how cv2 reads them.
-        boxes : see format codes
-            the data for boxes being written onto images. see format codes below
-            for more information.
-        boxes_format : int, optional (default=0)
-            the code indicating the formating of the boxes variable. see format
-            codes below for more information.
-        colorfile : str, optional (default='colors.pt')
-            the file containing colors for the boxes.
+        this method is used to write boxes onto images.
 
-        --- format codes ---
-        0 : boxes = list[torch.tensor]
-            boxes is a list of tensors, where each tensor corresponds to an
-            image in imgs, and the first dimension of each tensor should contain
-            [class #, xcenter, ycenter, width, height]
-            where all the measurements are normalized with respect to the 
-            image's dimensions. boxes will be labeled and colored corresponding
-            to class numbers.
-        1 : boxes = torch.tensor
-            boxes is a tensor who's first dimension should contain
-            [img #, xmin, ymin, xmax, ymax, box conf, class conf, class num]
-            where all the measurements are in units of pixels. boxes will be
-            colored based on class, and labeled with "[class]; [box conf], 
-            [class conf]".
+        --- args ---
+        boxes : list[torch.FloatTensor] OR torch.FloatTensor
+            the boxes to be written to each image. 
+            =>  if it is a LIST, it should contain tensors with size (_, 5) 
+                where the first dimension contains
+                    [class#, xcenter, ycenter, width, height]
+                where all measurements are normalized by image dimension.
+            =>  if it is a TENSOR, it should have size (_, 8) where the first
+                dimension contains:
+                    [img#, xmin, ymin, xmax, ymax, boxconf, clsconf, class#]
+                where all measurements are in pixels of the images, as provided.
+        images : list[numpy.ndarray], optional (defualt=None)
+            the set of images that are having boxes written onto them, formatted
+            exactly how cv2 reads them. if these are not provided, the data 
+            manager's *original* images will be used.
+        img_labels : list[string], optional (defualt=None)
+            if provided, each string will be placed in the top left corner of
+            each image. these should be in the same order as the images.
+        colorfile : string, optional (default='colors.pt')
+            the path to the color data for the boxes.
         
         --- returns ---
-        list[numpy.ndarray] : list of images with labeled boxes shown
+        list[numpy.ndarray] : list of the images with boxes written.
         '''
-        # read the color file
+        # +++ get the colors
         f = open(colorfile, 'rb')
         color_list = torch.load(f)
         f.close()
 
-        # list of all boxes and labels to display
+        # +++ load up and duplicate the images
+        if images == None: 
+            images = self['originals']
+        images = copy.deepcopy(images)
+
+        # +++ unpack all the boxes into a common format
         all_boxes = []
+        if isinstance(boxes, (list, tuple)): # list of tensors
+            # loop through each image
+            for img, img_boxes in zip(images, boxes):
+                img_boxes = img_boxes.clone()
 
-        # +++ populate the all_boxes list
-        if boxes_format == 0: # format code 0
-            # loop through images and the boxes for them
-            for img, img_boxes in zip(imgs, boxes):
-                img_boxes = img_boxes.clone() # make a copy of the boxes tensor
+                # if there are no boxes, just add an empty list
+                if img_boxes.numel() == 0:
+                    all_boxes.append(())
+                    continue
 
-                # get image dimensions
-                imy = img.shape[0] # img y dim
-                imx = img.shape[1] # img x dim
-
-                # calculate xmin and xmaxes
-                xmin = (img_boxes[:,1] - img_boxes[:,3]/2) * imx
-                ymin = (img_boxes[:,2] - img_boxes[:,4]/2) * imy
-                xmax = (img_boxes[:,1] + img_boxes[:,3]/2) * imx
-                ymax = (img_boxes[:,2] + img_boxes[:,4]/2) * imy
+                # calculate x/y min and x/y max for all the boxes
+                imy, imx, _ = img.shape
+                x, y, w, h = img_boxes[:,1:5].t()
+                xmin = (x - w/2) * imx
+                ymin = (y - h/2) * imy
+                xmax = (x + w/2) * imx
+                ymax = (y + h/2) * imy
                 
-                # get the box corners
-                c1s = torch.stack((xmin, ymin), dim=1).int().tolist()
-                c2s = torch.stack((xmax, ymax), dim=1).int().tolist()
-                c1s = [tuple(c1) for c1 in c1s]
-                c2s = [tuple(c2) for c2 in c2s]
-
-                # get the labels
+                # get the corners for each box
+                c1s = [tuple(c1) for c1 in \
+                    torch.stack((xmin, ymin), dim=1).int().tolist()]
+                c2s = [tuple(c2) for c2 in \
+                    torch.stack((xmax, ymax), dim=1).int().tolist()]
+                # make the labels for each box
                 lbls = [self.get_class(i) for i in img_boxes[:,0]]
 
-                # get colors
+                # get colors for each box
                 colors = [color_list[int(i)] for i in img_boxes[:,0]]
 
-                # make the final list of formatted image boxes
-                out_img_boxes = list(zip(lbls, c1s, c2s, colors))
-                all_boxes.append(out_img_boxes) # add it to the list
-        elif boxes_format == 1: # format code 1
-            for i in range(len(imgs)): # go through all img idxs
-                img_box_idxs = torch.where(boxes[:,0] == i) # get all box indexes
-                img_boxes = boxes[img_box_idxs] # get the boxes for this img
-                
-                # get the corners of the boxes
-                c1s = img_boxes[:,1:3].int().tolist()
-                c2s = img_boxes[:,3:5].int().tolist()
-                c1s = [tuple(c1) for c1 in c1s]
-                c2s = [tuple(c2) for c2 in c2s]
-
-                # make the labels and colors for the boxes
-                lbls = [] # labels list
-                colors = [] # colors list
-                for det in img_boxes: # go through detections
-                    lbl = f'{self.get_class(det[-1])};{det[5]:.3f},{det[6]:.3f}'
-                    lbls.append(lbl)
-                    colors.append(color_list[int(det[-1])])
-                
-                # make the formatted list of boxes for this img
+                # add the final list of image boxes to all_boxes
                 out_img_boxes = list(zip(lbls, c1s, c2s, colors))
                 all_boxes.append(out_img_boxes)
+        elif isinstance(boxes, torch.FloatTensor): # tensor
+            for i in range(len(images)):
+                # get the boxes for this img
+                img_boxes = boxes[torch.where(boxes[:,0] == i)]
+                
+                # get the corners of the boxes
+                c1s = [tuple(c1) for c1 in img_boxes[:,1:3].int().tolist()]
+                c2s = [tuple(c2) for c2 in img_boxes[:,3:5].int().tolist()]
+
+                # make the labels for each detection
+                lbls = [f'{self.get_class(det[7])};{det[5]:.3f},{det[6]:.3f}' \
+                    for det in img_boxes]
+                
+                # get the colors for each box
+                colors = [color_list[int(c)] for c in img_boxes[:,7]]
+
+                # add the formatted list of boxes for this img to all_boxes
+                out_img_boxes = list(zip(lbls, c1s, c2s, colors))
+                all_boxes.append(out_img_boxes)
+        else:
+            raise AttributeError(f'invalid type for boxes ({type(boxes).__name__})')
 
         # +++ write the boxes and labels onto the images
-        for i in range(len(imgs)): # go through indices
-            # get all the things for this image
-            img = imgs[i] # image
-            img_boxes = all_boxes[i] # boxes in this image
+        for i, (img, img_boxes) in enumerate(zip(images, all_boxes)):
+            # +++ calculate the font_scale and thickness to use
+            imy = img.shape[0]
+            txt_h = rel_txt_h * imy # desired text height
+            real_txt_h =    [cv2.getTextSize(lbl, self.font, 1, 1)[0][1] \
+                                for lbl, _, _, _ in img_boxes] + \
+                            [cv2.getTextSize('abcd0123', self.font, 1, 1)[0][1]]
+            font_scale = float(txt_h / max(real_txt_h))
+            font_thickness = max(1, int(txt_h/10))
+            box_thickness = int(font_thickness * 2)
 
-            # +++ check if there are any boxes
-            if len(img_boxes) == 0: # no boxes
-                continue # loop back
-
-            # +++ first, calculate the font_scale and thickness to use for this img
-            imy = img.shape[0] # get the images y dimension
-            txt_h = rel_txt_h * imy # get the text height (pixels)
-            real_txt_h = [cv2.getTextSize(lbl, self.font, 1, 1)[0][1] \
-                          for lbl, _, _, _ in img_boxes]
-                # get the actual text height of labels with no scaling
-            font_scale = float(txt_h / max(real_txt_h)) # get the scaling to be used
-            thickness = max(1, int(txt_h/10)) # get the thickness to use
-            bxthickness = int(thickness * 2) # box thickness
-
-            # +++ now loop through to write the boxes
-            for lbl, c1, c2, color in img_boxes:
-                # get the actual text size to make the text box corners with
-                txt_size = cv2.getTextSize(lbl, self.font, font_scale, thickness)[0]
-
-                # make the textbox corners
-                ct1 = (c1[0], c1[1] - txt_size[1] - 4) # top left of txt box
-                ct2 = (c1[0] + txt_size[0] + 4, c1[1]) # bottom right of txt box
-
-                # now write shit to the image
-                cv2.rectangle(img, c1, c2, color, bxthickness) # bounding box
-                cv2.rectangle(img, ct1, ct2, color, -1) # text box
-                cv2.putText(img, lbl, c1, self.font, font_scale, [255,255,255], thickness) 
-                    # text
-            
-            # +++ now write the label to the top left, if there is one
+            # +++ write the image label, if there is one
             if img_labels != None:
-                lbl = img_labels[i] # get the label
+                lbl = img_labels[i]
 
                 # get the text size
-                txt_size = cv2.getTextSize(lbl, self.font, font_scale, thickness)[0]
+                txt_size = cv2.getTextSize(lbl, self.font, font_scale, font_thickness)[0]
 
-                # get corners
+                # get important points
                 c1 = (0,0)
                 c2 = (txt_size[0]+4, txt_size[1]+4)
                 org = (2, txt_size[1]+2)
 
                 # write that shit
                 cv2.rectangle(img, c1, c2, [0,0,0], -1) # text box
-                cv2.putText(img, lbl, org, self.font, font_scale, [255,255,255], thickness)
+                cv2.putText(img, lbl, org, self.font, font_scale, [255,255,255], font_thickness) # label
+            
+            # +++ check if there are any boxes to write
+            if len(img_boxes) == 0:
+                continue
+
+            # +++ now loop through to write the boxes
+            for lbl, c1, c2, color in img_boxes:
+                # get the text size
+                txt_size = cv2.getTextSize(lbl, self.font, font_scale, font_thickness)[0]
+
+                # make the textbox corners
+                ct1 = (c1[0], c1[1] - txt_size[1] - 4) # top left of txt box
+                ct2 = (c1[0] + txt_size[0] + 4, c1[1]) # bottom right of txt box
+
+                # now write shit to the image
+                cv2.rectangle(img, c1, c2, color, box_thickness) # bounding box
+                cv2.rectangle(img, ct1, ct2, color, -1) # text box
+                cv2.putText(img, lbl, c1, self.font, font_scale, [255,255,255], font_thickness) # text
+        return images
     
     def scale_detections(self, detections):
         ''' scale detections method
-        this method takes in some detections that have been made on the resized
-        images in this data set, and scales them so that they are the detections
-        on the original images of this dataset.
+        this method takes in some detections that have been made on the rescaled
+        images and scales them back to fit the original images. it also makes 
+        sure that no detections go outside of the image dimensions.
         
         --- args ---
-        detections : torch.tensor with size (num_detections, >=5)
+        detections : torch.FloatTensor with size (num_detections, >=5)
             the tensor should store the detections as
-            [[img index, xmin, ymin, xmax, ymax, ...], ...]
-            where the image index is absolute in terms of the dataset. and the
+            [[img_index, xmin, ymin, xmax, ymax, ...], ...]
+            where the image index is absolute in terms of the dataset, and the
             measurements are in units of pixels of the resized images.
         
         --- returns ---
-        torch.tensor with same size : the scaled detections that can be mapped
+        torch.FloatTensor with same size : the scaled detections that can be mapped
             onto the original images of this set.
         '''
-        detections = detections.clone() # make a clone of the tensor
-        # get the info about how the detections need to be scaled
+        detections = detections.clone()
+
+        # get the scaling factors for each detection
         img_dims = self.get_dims()[detections[:,0].long()]
         scl_facs = img_dims/self.input_dim
+        
         # scale the detections
         detections[:,1:5] *= scl_facs.repeat(1,2)
+        
         # make sure they are all in the valid range
         detections[:,1:5] = torch.clamp(detections[:,1:5], min=0)
         detections[:,1:5] = torch.min(detections[:,1:5], img_dims.repeat(1,2))
@@ -375,3 +373,10 @@ class DataManager(object):
         return detections
 
     # +++ end of DataManager class
+
+if __name__ == '__main__':
+    dm = DataManager('test-data', 256)
+    lbls = dm['labels'][30:31]
+    imgs = dm['originals'][30:31]
+    dimgs = dm.write_boxes(lbls, images=imgs)
+    show_img(dimgs[0])

@@ -180,7 +180,7 @@ def load_images(img_dir, names, resize_to):
         # get the original image
         img_path = os.path.join(img_dir, f)
         orig_img = cv2.imread(img_path)
-        orig_dims = torch.FloatTensor(orig_img.shape[:2])
+        orig_dims = torch.FloatTensor(orig_img.shape[:2]).flip(0)
         # get the new image
         img = tfs(np.flip(orig_img, axis=2))
         # write output
