@@ -1,44 +1,69 @@
+'''
+this file holds network block classes that can be constructed from dictionaries
+assembled from the config files.
+'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# +++ helper functions
-def wh_iou_mat(anchors, targets):
-    ''' +++ INTERNAL FUNCTION +++ 
-    this function takes in two sets of widths and heights for anchor boxes and
-    target boxes, and calculates the IOU for each pair of boxes, assuming they
-    share a center.
-
+# +++ global functions
+def get_activ(activation):
+    ''' gets the activation function from the string provided.
+    
     --- args ---
-    anchors : torch.Tensor of shape (num_anchors, 2)
-        the anchor box's widths and heights.
-    targets : torch.Tensor of shape (num_targets, 2)
-        the target box's widths and heights.
+    activation : str
+        the string name of the activation function.
     
     --- returns ---
-    torch.Tensor of shape (num_anchors, num_targets) : the IOUs for each 
+    torch.nn.Module : the activation function requested.
+    OR
+    None : if activation = 'linear'
+    '''
+    if activation == 'relu':
+        act = nn.ReLU() # relu activation
+    elif activation == 'leaky':
+        act = nn.LeakyReLU(0.1)
+    elif activation == 'sigmoid':
+        act = nn.Sigmoid()
+    elif activation == 'linear':
+        act = nn.Identity()
+    return act
+
+def wh_iou_mat(box_wh1, box_wh2):
+    ''' +++ INTERNAL FUNCTION +++ 
+    this function creates a matrix of IOU values between two sets of box widths
+    and heights, assuming that they share a center.
+
+    --- args ---
+    box_wh1 : torch.Tensor of shape (num_boxes1, 2)
+        the first set of box widths and heights.
+    targets : torch.Tensor of shape (num_boxes2, 2)
+        the second set of box widths and heights.
+    
+    --- returns ---
+    torch.Tensor of shape (num_boxes1, num_boxes2) : the IOUs for each 
         combination of anchor box and target box, where the index [i,j] 
         corresponds to the ith anchor box and jth target box given.
     '''
     # make copies of the tensors
-    anchors = anchors.clone().float()
-    targets = targets.clone().float()
+    box_wh1 = box_wh1.clone().float()
+    box_wh2 = box_wh2.clone().float()
 
     # unpack the inputs
-    aw, ah = anchors[:,0], anchors[:,1] # anchor widths and heights
-    tw, th = targets[:,0], targets[:,1] # target widths and heights
+    bx1_w, bx1_h = box_wh1[:,0], box_wh1[:,1]
+    bx2_w, bx2_h = box_wh2[:,0], box_wh2[:,1]
 
     # get the areas for each anchor box/target box
-    a_areas, t_areas = torch.meshgrid(anchors.prod(1), targets.prod(1))
+    bx1_areas, bx2_areas = torch.meshgrid(box_wh1.prod(1), box_wh2.prod(1))
         # note: this also puts the areas in matrix format
     
     # calculate the intersection areas
-    int_widths = torch.min(*torch.meshgrid(aw, tw))
-    int_heights = torch.min(*torch.meshgrid(ah, th))
+    int_widths = torch.min(*torch.meshgrid(bx1_w, bx2_w))
+    int_heights = torch.min(*torch.meshgrid(bx1_h, bx2_h))
     intersect_areas = int_widths * int_heights
     
     # calculate union areas
-    union_areas = a_areas + t_areas - intersect_areas
+    union_areas = bx1_areas + bx2_areas - intersect_areas
 
     # return intersect over union
     return intersect_areas/union_areas
@@ -85,8 +110,22 @@ def bbox_xywh_ious(boxes1, boxes2):
     # return intersection over union
     return int_A / union_A
 
-# +++ network block classes
+# +++ EXAMPLE BLOCK_DICT
+block_dict = {
+    'layer_num': 0,
+    'type': 'detection',
+    'name': 'foo',
+    'anchors': [[12, 26], [14, 29], [15, 34]], # DONT USE THESE FUCK I NEED TO FIGURE THIS OUT FOR THE DATA
+    'ignore_thresh': 0.7,
+    'lambda_bbox': 1.0,
+    'lambda_noobj': 1.00,
+    'lambda_obj': 1.0,
+    'lambda_cls': 1.0,
+    'input_dim': 256,
+    'classes': 21,
+    'lbl_smoothing': 0.05}
 
+# +++ network block classes
 class DetBlock(nn.Module):
     ''' detection block
     a detection block is at the core of both YOLO and SqueezeDet architectures.
@@ -126,7 +165,7 @@ class DetBlock(nn.Module):
         
         # +++ initialize some variables
         # loss functions
-        self.se_loss = nn.MSELoss() ### reduction=block_dict['loss_reduction']) # sum/mean squared error
+        self.mse_loss = nn.MSELoss()
         self.bce_loss = nn.BCELoss()
         # loss lambdas
         self.lambda_obj = block_dict['lambda_obj']
@@ -240,25 +279,35 @@ class DetBlock(nn.Module):
 
         # +++ calculate some losses, using the masks to ignore certain outputs
             # that we don't care about/don't want to affect our loss
-        
-        ### bounding box loss
-        loss_bbox = self.se_loss(prediction[...,0:4][obj_mask], txywh[obj_mask]) \
-            * self.lambda_bbox
-        
-        ### obj/noobj confidence loss
-        loss_conf_obj = self.bce_loss(
-            prediction[...,4][obj_mask], tconf[obj_mask]) * self.lambda_obj
+        # initialize all losses to zero
+        loss_conf_obj, loss_conf_noobj, loss_bbox, loss_cls = torch.zeros(4)
+
+        ### noobj confidence loss
         loss_conf_noobj = self.bce_loss(
             prediction[...,4][noobj_mask], tconf[noobj_mask]) * self.lambda_noobj
-        # loss_conf_noobj = self.bce_loss(
-        #     prediction[..., 4] * noobj_mask, tconf * noobj_mask) * self.lambda_noobj
-        loss_conf = loss_conf_obj + loss_conf_noobj
-        
-        ### class loss
-        loss_cls = self.bce_loss(
-            prediction[...,5:][obj_mask], tcls[obj_mask]) * self.lambda_cls
-        # sum above to get total loss
+        loss_conf = loss_conf_noobj
+
+        ### this conditional protects against nan loss values
+        if obj_mask.any():
+            ### obj/noobj confidence loss
+            loss_conf_obj = self.bce_loss(
+                prediction[...,4][obj_mask], tconf[obj_mask]) * self.lambda_obj
+            loss_conf += loss_conf_obj
+
+            ### bounding box loss
+            loss_bbox = self.mse_loss(prediction[...,0:4][obj_mask], txywh[obj_mask]) \
+                * self.lambda_bbox
+                    
+            ### class loss
+            loss_cls = self.bce_loss(
+                prediction[...,5:][obj_mask], tcls[obj_mask]) * self.lambda_cls
+
+        ### sum above to get total loss
         total_loss = loss_bbox + loss_conf + loss_cls
+
+        ##############################
+        ###  METRICS CALCULATIONS  ###
+        ##############################
 
         # +++ a few helper masks for the metrics
         conf50 = (prediction[...,4] > 0.5).float()
@@ -401,4 +450,4 @@ class DetBlock(nn.Module):
         txywh = torch.stack((tx, ty, tw, th), dim=-1)
         return obj_mask, noobj_mask, txywh, tcls, tconf, correct_cls, iou_scores
 
-    # +++ end of DetBlock class
+    # +++ end of YoloBlock class
