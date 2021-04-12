@@ -1,202 +1,320 @@
 ''' datamanager.py
-contains the DataManager class
+this file contains...
+
 '''
+# +++ IMPORTS
 import os
-import numpy as np
 import copy
-import random
-import matplotlib.pyplot as plt
+import torch
 import cv2
-from datamanager.util import *
+from .bbox_util import bb_xywh_to_cs
+from .aug_funcs import make_mosaics_aug, make_mixup_aug, make_cutmix_aug, \
+    make_cutout_aug, hflip_aug, vflip_aug, rand_rot_aug
 
 
-class DataManager(object):
+# +++ STATIC GLOBAL VARIABLES
+_CUDA_DEVICE = 'cuda:0'
+
+# +++ CLASS: DataManager
+class DataManager:
     ''' data manager class
-    this class is used to load image and label data for the neural networks. it
-    loads data from a given directory that has two sub directories: 'images' 
-    (containing files that look like '[filename].jpg'), and 'labels' (with files
-    that look like '[filename].txt') with the labels for each image in the 
-    dataset. additionally, if not otherwise specified, there should be a .labels
-    file in the directory that has the class labels. see documentation for more 
-    information about formatting.
+    this class manages the data from neural networks. it loads the data from a
+    binary .pt file as saved by the DataParser class. it also performs active
+    random data augmentation upon the calling of batches, as specified when
+    initialized. 
     
     --- args ---
-    path : str
-        path to the directory to load data from.
-    input_dim : int
-        the square size of images that should be when they get batched.
-    class_file : str, optional (default=None)
-        if the .txt file containing class data is not in the given directory,
-        provide it here.
-    **data_aug
-        keyword arguments for data augmentation. each argument should be the
-        type of data augmentation that should be done, associated with a float
-        indicating the amount of that type of augmented data, relative to the
-        whole dataset.
-        valid keywords are : mosaics
+    data_path : str
+        path to the .pt file to load the data from.
+    **data_aug (all floats, all defualts are 0)
+    === data creation **data_aug ===
+        all values here are the amount of data to be created *relative* to the
+        amount of data already in the data set.
+    + mosaics : adds mosaic data augmentation.
+    + mixup : adds mixup data augmentation.
+    + cutmix : adds cutmix data augmentation.
+    + cutout : cutout data augmentation.
+    === data manipulation **data_aug ===
+        all values here are the odds that a single image in a batch will
+        undergo that specific data augmentation.
+    + hflip : horizontal flipping.
+    + vflip : vertical flipping.
+    + rot : random rotation by a multiple of 90 degrees.
+    === nitty gritty **data_aug values ===
+    + iou_threshs=(0.7,0.2) : the iou thresholds for data augmentation. when
+        trimming, boxes will be dropped if the iou of the original and the
+        portion inside the trim is greater than the first threshold value. when
+        cropping, boxes will only be kept if the iou of the original and
+        cropped box exceeds the second threshold value.
+    + cut_range=(0.3,0.5) : the minimum and maximum cut sizes, respectively,
+        both relative to the image size, during cutout data augmentation.
     '''
+    # +++ STATIC VARIABLES
     font = cv2.FONT_HERSHEY_SIMPLEX
-    _columns = ['names','originals','dims','images','labels']
-    
-    # +++ built in methods
-    def __init__(self, path, input_dim, class_file=None, **data_aug):
-        # save the inputs 
-        self.path = os.path.realpath(path)
-        self.input_dim = input_dim
-        # read all the shit from the path
-        self._classes, img_dir, lbl_dir, names = read_dir(self.path)
-        # sort out the classes
-        if self._classes == None and class_file == None:
-            raise AttributeError(f'no class file found and none provided')
-        elif self._classes == None and class_file != None:
-            self._classes = load_classes(os.path.realpath(class_file))
-        # now we make the whole data array
-        self._data = np.empty((len(names), 5), dtype=object)
-        # loading stuff into the data array
-        self._data[:,0] = np.array(names)
-        self._data[:,1:4] = load_images(img_dir, names, self.input_dim)
-        self._data[:,4] = load_labels(lbl_dir, names)
-        # save the info about data augmentation
-        self.data_aug = data_aug
-        self._aug_imgs = None
-        self._aug_lbls = None
-        # end of __init__
-    
-    # +++ built in functions
+    columns = ['names','originals','dims','images','labels']
+
+    # +++ BUILT IN METHODS
+    def __init__(self, data_path, CUDA=False, **data_aug):
+        # +++ load the data
+        self.data_path = os.path.realpath(data_path)
+        self.data, self.classes, self.input_dim = torch.load(self.data_path)
+        # +++ save the info about data augmentation
+        self.device = _CUDA_DEVICE if CUDA else 'cpu'
+        iou_threshs = data_aug.get('iou_threshs', (0.7,0.2))
+        cut_range = data_aug.get('cut_range', (0.3, 0.5))
+        self._make_aug = {
+            make_mosaics_aug: {
+                'n': int(data_aug.get('mosaics', 0.0) * self.get_len(False)),
+                'iou_thresh': iou_threshs[1]},
+            make_mixup_aug: {
+                'n': int(data_aug.get('mixup', 0.0) * self.get_len(False))},
+            make_cutmix_aug: {
+                'n': int(data_aug.get('cutmix', 0.0) * self.get_len(False)),
+                'iou_threshs': iou_threshs,
+                'cut_range': cut_range},
+            make_cutout_aug: {
+                'n': int(data_aug.get('cutout', 0.0) * self.get_len(False)),
+                'cut_range': cut_range,
+                'iou_thresh': iou_threshs[0]}}
+        self._aug = {
+            hflip_aug: data_aug.get('cutout', 0.0),
+            vflip_aug: data_aug.get('vflip', 0.0),
+            rand_rot_aug: data_aug.get('rot', 0.0)}
+
     def __repr__(self):
-        datadir = os.path.relpath(self.path)
-        return f'DataManager(dir=\'{datadir}\', dim={self.input_dim})'
+        data_file = os.path.relpath(self.data_path)
+        return f'DataManager({data_file})'
 
     def __getitem__(self, index):
-        if isinstance(index, int):
-            assert index in range(5), f'invalid data manager index ({index})'
-            return list(self._data[:, index])
-        elif isinstance(index, str):
-            assert index in self._columns, f'got invalid column \'{index}\''
-            i = self._columns.index(index)
-            return list(self._data[:,i])
-        
-    # +++ get methods
+        if isinstance(index, int) and 0 <= index < 5:
+            return list(self.data[:, index])
+        if isinstance(index, str) and index in self.columns:
+            i = self.columns.index(index)
+            return list(self.data[:,i])
+        raise IndexError(f'invalid data manager index ({index})')
+
+    # +++ GETTING METHODS
+    def get_names(self):
+        ''' get names
+
+        --- returns ---
+        list[str] : the list of names of data points for the data, in order.
+        '''
+        return self['names']
+
     def get_dims(self):
+        ''' get dimensions
+
+        --- returns ---
+        torch.FloatTensor : a tensor containing the x,y dimensions for each
+            data point in the data, in order.
+        '''
         return torch.stack(self['dims'], dim=0)
 
-    def get_imgs(self, augmented=False):
-        imgs = torch.stack(self[3], dim=0)
-        if augmented and self._aug_imgs != None:
-            imgs = torch.cat((imgs, self._aug_imgs), dim=0)
-        return imgs
-    
-    def get_lbls(self, augmented=False):
-        lbls = self[4]
-        if augmented and self._aug_lbls != None:
-            lbls += self._aug_lbls
-        return lbls
-    
-    def get_len(self, augmented=False):
-        l = self._data.shape[0]
-        if augmented and self._aug_imgs != None:
-            l += self._aug_imgs.size(0)
-        return l
+    def get_imgs(self):
+        ''' get images
 
-    # +++ data manager methods
-    def augment_data(self):
-        # reset the current data
-        self._aug_imgs = torch.FloatTensor(0,3,self.input_dim,self.input_dim)
-        self._aug_lbls = []
-        # make the augmented data
-        if 'mosaics' in self.data_aug and self.data_aug['mosaics'] != 0.0:
-            n = int(self.get_len() * self.data_aug['mosaics'])
-            imgs, lbls = make_mosaics(self.get_imgs(), self.get_lbls(), n)
-            self._aug_imgs = torch.cat((self._aug_imgs, imgs), dim=0)
-            self._aug_lbls += lbls
+        --- returns ---
+        torch.FloatTensor : a tensor containing the all the images in the data
+            stacked together, in order. if augmented = True, then augmented
+            images will be included as well (at the end).
+        '''
+        return torch.stack(self[3], dim=0)
 
-    def make_batch(self, idxs):
-        ''' make batch method
-        this method takes in a list of indexes to batch together and outputs a
-        tuple with the (batch_data, batch_labels) for that set of indices.
+    def get_lbls(self):
+        ''' get images
+
+        --- returns ---
+        list[torch.FloatTensor] : a list of the tensors containing the all the
+            labels for the images in the data, in order. if augmented = True,
+            augmented labels will be included as well (at the end).
+        '''
+        return self[4]
+
+    def get_len(self, augmented=True):
+        ''' get the number of data points
+        
+        --- args ---
+        augmented : bool, optional (defualt=True)
+            if true, the amount of data that will be augmented will be included
+            as data points.
+
+        --- returns ---
+        int : number of data points in the set. 
+        '''
+        out = self.data.shape[0]
+        if augmented:
+            for f in self._make_aug:
+                out += self._make_aug[f]['n']
+        return out
+
+    def get_class(self, class_num):
+        ''' get class method
+        gets the name of the class associated with the number provided.
 
         --- args ---
-        idxs : list[int(s)]
-            the indexes of images in this batch.
-        
+        class_num : int
+            the number of the class.
         --- returns ---
-        torch.tensor : the batch_data, with shape (batch_size, 3, input_dim,
-            input_dim)
-        torch.tensor : the batch_labels, with shape (num_lbls, 6)
+        str : the name of the class.
         '''
-        # get images for the batch
-        imgs = self.get_imgs()[idxs]
-        # get labels for the batch
-        lbls = torch.FloatTensor(0,6)
-        for img_n, i in enumerate(idxs):
-            lbl = self._data[i, 4].clone()
-            img_n_col = torch.FloatTensor(lbl.size(0), 1).fill_(img_n)
-            lbl = torch.cat((img_n_col, lbl), dim=1)
-            lbls = torch.cat((lbls, lbl), dim=0)
-        # return the batch tuple
-        return (imgs, lbls)
-    
-    def batches(self, batch_size=None, shuffle=True, augmented=True):
+        return self.classes[int(class_num)]
+
+    # +++ DATA MANAGER METHODS
+    def get_data(self, augment=True):
+        ''' get data method
+        this method gets the data (images and labels) that are given to the
+        data manager.
+
+        --- args ---
+        augment : bool, optional (default=True)
+            should augmented data be included in the
+
+        --- returns ---
+        torch.FloatTensor : the augmented images.
+        list[torch.FloatTensor] : the augmented labels.
+        '''
+        # +++ get the dataset's data
+        imgs = self.get_imgs()
+        lbls = self.get_lbls()
+        # +++ if not augmenting, return here
+        if not augment:
+            return imgs, lbls
+        # +++ get ready to do data augmentation wootwoot
+        imgs = imgs.to(self.device)
+        lbls = [lbl.to(self.device) for lbl in lbls]
+        aug_imgs = torch.FloatTensor(0, 3, self.input_dim, self.input_dim)
+        aug_imgs = aug_imgs.to(self.device)
+        aug_lbls = []
+        # +++ create the augmented data that needs creating
+        for func in self._make_aug:
+            # skip if no images are being made
+            if self._make_aug[func]['n'] == 0: 
+                continue
+            # augment data
+            aimgs, albls = func(imgs, lbls, **self._make_aug[func])
+            # add augmented data to the set
+            aug_imgs = torch.cat((aug_imgs, aimgs), dim=0)
+            aug_lbls += albls
+            del aimgs, albls
+        # +++ add all the created data to the set
+        imgs = torch.cat((imgs, aug_imgs), dim=0)
+        lbls = lbls + aug_lbls
+        # +++ augment the data already in the dataset
+        _aug = copy.deepcopy(self._aug) # make a copy of the aug dict to use
+        for func in _aug:
+            # skip if nothing is being augmented
+            if _aug[func] == 0:
+                continue
+            # randomly choose images to be augmented
+            idxs = torch.where(
+                torch.rand((self.get_len(),)) < _aug[func])[0]
+            # feed that shit through the function to augment
+            func(imgs, lbls, idxs=idxs)
+        # +++ move the data to the cpu and return
+        imgs = imgs.cpu()
+        lbls = [lbl.cpu() for lbl in lbls]
+        return imgs, lbls
+
+    def _make_batch(self, imgs, lbls, idxs):
+        ''' make batch method
+        this method takes in the images, labels, and indexes of the data points
+        to use in this batch, and outputs a tuple with the (batch_data,
+        batch_labels) that are perscribed by the indicies.
+
+        --- args ---
+        imgs : torch.FloatTensor like (N, 3, input_dim, input_dim)
+            the images in the dataset.
+        lbls : list[torch.FloatTensor like (_, 5)]
+            the list of labels of the dataset.
+        idxs : list[int(s)] or torch.LongTensor like (batch_size,)
+            the indexes of images in this batch.
+
+        --- returns ---
+        torch.FloatTensor : the batch_data, with shape (batch_size, 3,
+            input_dim, input_dim).
+        torch.tensor : the batch_labels, with shape (_, 6).
+        '''
+        # get the images to use
+        batch_data = imgs[idxs]
+        # construct the labels tensor
+        batch_labels = torch.FloatTensor(0,6)
+        for i, j in enumerate(idxs):
+            lbl = lbls[j]
+            img_i_col = torch.FloatTensor(lbl.size(0), 1).fill_(i)
+            lbl = torch.cat((img_i_col, lbl), dim=1)
+            batch_labels = torch.cat((batch_labels, lbl), dim=0)
+        # return
+        return (batch_data, batch_labels)
+
+    def batches(self, batch_size=None, mini_batch_size=None, shuffle=True, augmented=True):
         ''' batches method
         this method makes batches with the perscribed hyper parameters. note
-        that if mini_batch_size is NOT set, this will just return a list of 
+        that if mini_batch_size is NOT set, this will just return a list of
         batches, where as is it IS set, it will return a list of lists of mini
         batches.
 
         --- args ---
         batch_size : int, optional (default=None)
-            the size that the returned batches should be. if None, all the data
-            will be in a single batch.
-        mosaics : float, optional (default=None)
-            if set, the dataset will be augmented with this percent of mosaic 
-            data. these mosaics are generated fresh each time it's called, and
-            will never be the same.
+            the size that the returned batches should be. if not set, all the
+            data will be put into a single batch.
+        mini_batch_size : int, optional (default=None)
+            the size of mini batches. if not set, all the data in a batch will
+            be put into a single mini batch. also note that this should be a
+            factor of batch_size.
         shuffle : bool, optional (defualt=True)
             if true, the data will be shuffled prior to batching.
         augmented : bool, optional (defualt=True)
-            if true, augmented data will be mixed in amoung the batches.
-        
+            if true, augmented data will be generated for this set of batches.
+
         --- returns ---
-        list[tuple[torch.tensor, torch.tensor]] : a list of the batch tuples,
-            containing batch_data and batch_labels
+        list[list[tuple[torch.tensor, torch.tensor]]] : a list of the batches,
+            where each batch is a list containg tuples of mini batch data, mini
+            batch labels.
+        OR IF mini_batch_size = None
+        list[tuple[torch.tensor, torch.tensor]] : the list of the batches,
+            where each batch is a tuple of (batch_data, batch_labels).
         '''
-        # generate augmented data
-        if augmented: self.augment_data()
-        l = self.get_len(augmented)
-        # check batch size
-        if batch_size == None:
-            batch_size = l
-        # get the images and labels
-        images = self.get_imgs(augmented)
-        labels = self.get_lbls(augmented)
-        # setup for the main loop
-        num_batches = l//batch_size
-        img_idxs = list(range(l))
-        if shuffle: random.shuffle(img_idxs)
-        batches = [] # output
-        # loop through batch indexes
-        for batch_i in range(num_batches):
-            # get the image indexes for this batch
-            b_idxs = img_idxs[batch_i * batch_size : (batch_i + 1) * batch_size]
-            # make the batch
-            bimgs = images[b_idxs]
-            blbls = batch_labels(labels, b_idxs)
-            batches.append((bimgs, blbls))
-        # return the batches
+        # error check
+        if (batch_size is None) and (not mini_batch_size is None):
+            raise ValueError('cannot have None batch_size and non-None '
+                f'mini_batch_size ({mini_batch_size})')
+        if (not batch_size is None) and \
+            (not mini_batch_size is None) and \
+            (batch_size % mini_batch_size != 0):
+            raise ValueError(f'batch size ({batch_size}) must be a clean '
+                f' multiple of mini batch size ({mini_batch_size})')
+        # set batch / mini batch size
+        make_mini_bs = bool(mini_batch_size)
+        if batch_size is None:
+            batch_size = self.get_len(augmented=augmented)
+        if mini_batch_size is None:
+            mini_batch_size = batch_size
+        # get the data
+        imgs, lbls = self.get_data(augment=augmented)
+        # get the indexes to use in order, based on shuffle
+        if shuffle:
+            idxs = torch.randperm(self.get_len())
+        else:
+            idxs = torch.arange(self.get_len())
+        # now make the batches
+        num_batches = self.get_len() // batch_size
+        num_mini_batches = batch_size // mini_batch_size
+        batches = []
+        for i in range(num_batches):
+            mini_batches = []
+            for j in range(num_mini_batches):
+                start_i = i*batch_size + j*mini_batch_size
+                end_i = i*batch_size + (j+1)*mini_batch_size
+                mini_batches.append(self._make_batch(imgs, lbls,
+                    idxs[start_i : end_i]))
+            # add the mini_batch (or batch) to the list
+            if make_mini_bs:
+                batches.append(mini_batches)
+            else:
+                batches.append(mini_batches[0])
+        # return, and maybe collapse the minibatches
         return batches
-    
-    def get_class(self, class_num):
-        ''' get class method
-        used to get the class label from the class number.
-        
-        --- args ---
-        class_num : int
-            the index of the class.
-        
-        --- returns ---
-        str : the name of the class.
-        '''
-        return self._classes[int(class_num)]
 
     def write_boxes(self, boxes, images=None, img_labels=None,
                     colorfile='colors.pt', rel_txt_h=0.02):
@@ -249,19 +367,17 @@ class DataManager(object):
                     all_boxes.append(())
                     continue
 
-                # calculate x/y min and x/y max for all the boxes
-                imy, imx, _ = img.shape
-                x, y, w, h = img_boxes[:,1:5].t()
-                xmin = (x - w/2) * imx
-                ymin = (y - h/2) * imy
-                xmax = (x + w/2) * imx
-                ymax = (y + h/2) * imy
-                
+                # convert xywh to x/y min and x/y max for all the boxes
+                bb_xywh_to_cs(img_boxes[:,1:5])
+
+                # convert measuremnets to pixels
+                imy, imx, _ = img.shape 
+                img_boxes[:,[1,3]] *= imx 
+                img_boxes[:,[2,4]] *= imy
+
                 # get the corners for each box
-                c1s = [tuple(c1) for c1 in \
-                    torch.stack((xmin, ymin), dim=1).int().tolist()]
-                c2s = [tuple(c2) for c2 in \
-                    torch.stack((xmax, ymax), dim=1).int().tolist()]
+                c1s = [tuple(c1) for c1 in img_boxes[:,1:3].long().tolist()]
+                c2s = [tuple(c2) for c2 in img_boxes[:,3:5].long().tolist()]
                 # make the labels for each box
                 lbls = [self.get_class(i) for i in img_boxes[:,0]]
 
@@ -339,44 +455,32 @@ class DataManager(object):
                 cv2.rectangle(img, ct1, ct2, color, -1) # text box
                 cv2.putText(img, lbl, c1, self.font, font_scale, [255,255,255], font_thickness) # text
         return images
-    
+
     def scale_detections(self, detections):
         ''' scale detections method
         this method takes in some detections that have been made on the rescaled
-        images and scales them back to fit the original images. it also makes 
+        images and scales them back to fit the original images. it also makes
         sure that no detections go outside of the image dimensions.
-        
+
         --- args ---
         detections : torch.FloatTensor with size (num_detections, >=5)
             the tensor should store the detections as
             [[img_index, xmin, ymin, xmax, ymax, ...], ...]
             where the image index is absolute in terms of the dataset, and the
             measurements are in units of pixels of the resized images.
-        
+
         --- returns ---
         torch.FloatTensor with same size : the scaled detections that can be mapped
             onto the original images of this set.
         '''
+        # make a copy of the detections
         detections = detections.clone()
-
         # get the scaling factors for each detection
         img_dims = self.get_dims()[detections[:,0].long()]
         scl_facs = img_dims/self.input_dim
-        
         # scale the detections
         detections[:,1:5] *= scl_facs.repeat(1,2)
-        
         # make sure they are all in the valid range
         detections[:,1:5] = torch.clamp(detections[:,1:5], min=0)
         detections[:,1:5] = torch.min(detections[:,1:5], img_dims.repeat(1,2))
-
         return detections
-
-    # +++ end of DataManager class
-
-if __name__ == '__main__':
-    dm = DataManager('test-data', 256)
-    lbls = dm['labels'][30:31]
-    imgs = dm['originals'][30:31]
-    dimgs = dm.write_boxes(lbls, images=imgs)
-    show_img(dimgs[0])
