@@ -9,12 +9,10 @@ last updated 01/09/2021
 
 import torch 
 import torch.nn as nn
-import torch.nn.functional as F 
-import numpy as np
-import cv2 
 import copy
 
-from util import * # import utility functions
+# from util import * # import utility functions
+# from util import *
 from config import read_cfg # import function to read config file
 from network_blocks import NET_BLOCKS, DetBlock # import network blocks
 
@@ -34,16 +32,11 @@ class NetworkModel(nn.Module):
 
         # +++ save cuda
         self.CUDA = CUDA # should cuda be used
-        
+
         # +++ setup the network
+        self.reset_metrics() # setup the metric dictionary
         self.netblocks = read_cfg(cfgfile) # read config file
         self._build_network() # build the network from the config file
-        
-        # +++ send the whole network to the right place
-        if self.CUDA: \
-            self.to('cuda:0') 
-        else:
-            self.to('cpu')
 
     def _build_network(self):
         ''' +++ INTERNAL METHOD +++
@@ -53,7 +46,6 @@ class NetworkModel(nn.Module):
         self.input_dim = self.net_info['input_dim'] # img input dim
         self.num_classes = self.net_info['classes'] # number of classes
         self.num_blocks = len(self.netblocks) # set number of blocks
-        self.reset_metrics() # reset metric dict
 
         # +++ get ready to build the network
         self.all_modules = nn.ModuleList() # list of blocks
@@ -64,16 +56,16 @@ class NetworkModel(nn.Module):
 
         # +++ main loop to build network
         for block in self.netblocks: # loop through network blocks
-            
+
             btype = block['type'] # get the block's type
-            
+
             if btype == 'detection':
                 # setup the detection block
                 block_module = DetBlock(block, CUDA=self.CUDA)
             else:
                 # all other blocks can be initialized with the dict
                 block_module = NET_BLOCKS[btype](block)
-            
+
             # some special cases
             if btype == 'detection':
                 self.det_layers.append(block_module)
@@ -81,7 +73,7 @@ class NetworkModel(nn.Module):
                 self.dropblock_layers.append(block_module)
 
             self.all_modules.append(block_module) # add it to the list
-    
+
     def set_db_kp(self, pct):
         ''' set drop block keep percentage method
         sets the keep percentage for each dropblock layer. using a linear model.
@@ -103,7 +95,6 @@ class NetworkModel(nn.Module):
             the minibatch; should have shape (batch_size, h, w, channels)
         '''
         # +++ setup variables before the loop
-        detections = [] # list of detections made
         layer_outputs = {} # outputs of each network layer (need to save each
             # since routing/shortcut layers will refer back to them)
         output = None # output variable (will store a tensor)
@@ -144,30 +135,37 @@ class NetworkModel(nn.Module):
             layer_outputs[module.n] = x
         
         # update the metrics
-        self._update_metrics()
-
+        if targets != None:
+            self._update_metrics()
+        
         if targets == None:
             return output # just return the output
         else:
             return output, loss # return output and loss
 
     def reset_metrics(self):
+        ''' reset metrics method
+        resets all of the current metrics to be zero.
+        '''
         self._metrics = {
             'loss': 0.,
             'bbox-loss': 0.,
+            'noobj-conf-loss': 0.,
+            'obj-conf-loss': 0.,
             'conf-loss': 0.,
             'cls-loss': 0.,
             'cls-accuracy': 0.,
+            'cls-acc-by-cls': torch.zeros(self.num_classes),
             'recall50': 0.,
             'recall75': 0.,
             'precision': 0.,
             'conf-obj': 0.,
             'conf-noobj': 0.}
         self.metric_batch_counter = 0.
-    
+
     def _update_metrics(self):
         ''' +++ INTERNAL METHOD +++
-        this method goes through all detection layer metrics and updates the 
+        this method goes through all detection layer metrics and updates the
         class-wide metrics with them.
         '''
         ndet_layers = len(self.det_layers) # number of detection layers
@@ -182,11 +180,38 @@ class NetworkModel(nn.Module):
 
     @property
     def metrics(self):
+        ''' metrics
+        gets the metrics from the model, averaged over each batch and detection
+        layer.
+        '''
         batch_cnt = max(self.metric_batch_counter, 1.) # batch count
         metrics = copy.deepcopy(self._metrics)  # copy of the metrics dictionary
         for key in metrics: # go through metrics
             # average all metrics over the batches
             metrics[key] = metrics[key] / batch_cnt
         return metrics
-        
 
+    def print_metrics(self, classes=None, prefix='\t'):
+        ''' print metrics method
+        prints to the console the current metrics that the network has stored.
+        
+        --- args ---
+        classes : list[str], optional (default=None)
+            a list of the string names of the classes. if provided, class names
+            will be printed instead of numbers.
+        prefix : str, optional (defualt='\t')
+            a prefix that will be attached to the start of everything printed.
+        '''
+        # +++ setup
+        metrics = self.metrics()
+        if classes is None:
+            classes = [str(i) for i in range(self.num_classes)]
+        
+        # +++ loop to print
+        for metric in metrics:
+            if metric == 'cls-acc-by-cls':
+                print(f'{prefix}{metric}:')
+                for i in range(self.num_classes):
+                    print(f'{prefix}\t({i}) {classes[i]}: {metrics[metric][i]:.4f}')
+            else:
+                print(f'{prefix}{metric}: {metrics[metric]:.4f}')

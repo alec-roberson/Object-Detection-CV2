@@ -3,8 +3,6 @@ this file trains the network.
 '''
 
 # +++ imports
-import os
-import random
 from tqdm import tqdm
 import torch 
 import torch.optim as optim
@@ -13,84 +11,96 @@ from torch.utils.tensorboard import SummaryWriter
 from model import NetworkModel
 from datamanager import DataManager
 
-# +++ training prefrences
-CUDA = True # should cuda be used?
-NUM_EPOCHS = 1000 # number of epochs to run for
-BATCH_SIZE = 64 # batch size
-MINI_BATCH_SIZE = 32 # mini batch size
-MOSAICS = None # amount of mosaic augmented data to train on
-LEARNING_RATE = 0.01 # learning rate
-WEIGHT_DECAY = 0.001 # learning rate decay
-BETAS = (0.9, 0.999) # betas for Adam training
-WRITE_EVERY = 1 # tensorboard data will be written every ___ epochs
-START_SAVING_BEST = None # how far into training saving should begin
 
 # +++ file locations
-load_net = None # if you'd like to load a network, set this to the path of the network
-net_cfg = 'cfg/squeezedet.cfg' # network configuration file
-classes_file = 'data/class-names.labels' # class labels file
-train_directory = 'data/train' # training images/labels directory
-test_directory = 'data/test' # testing images/labels directory
-net_name = 'chess-squeezedet' # where to save the network after training
-tb_logdir = 'runs/' + net_name # log for tensorboard
+NET_CFG = 'cfg/yolov3-mid-416.cfg' # 'cfg/squeezedet.cfg' # network configuration file
+TRAIN_FILE = 'data/train-data-t-416.pt' # training images/labels directory
+TEST_FILE = 'data/test-data-t-416.pt' # testing images/labels directory
+NET_NAME = 'yv3m-t-416-0' # where to save the network after training
+TB_LOGDIR = 'runs/' + NET_NAME # log for tensorboard
+SAVE_NET = NET_NAME + '.pt' # file to save net to
 
-# +++ setup files
-save_net = net_name + '.pt' # file to save net to
-### save_best_net = net_name + '-best.pt' # file to save "best" net to
+# +++ data preferences
+BATCH_SIZE = 32 # batch size
+MINI_BATCH_SIZE = 32 # mini batch size
+AUG_CUDA = True # should data be used for data augmentation
+DATA_AUG = {
+    'mosaics': 0.25,
+    'mixup': 0.25,
+    'cutmix': 0.25,
+    'cutout': 0.25,
+    'hflip': 0.25,
+    'vflip': 0.25,
+    'rot': 0.25
+}
 
+# +++ training prefrences
+CUDA = True # should cuda be used for the network
+NUM_EPOCHS = 500 # number of epochs to run for
+WRITE_EVERY = 1 # tensorboard data will be written every ___ epochs
+
+# +++ optimizer prefrences
+LEARNING_RATE = 0.001 # learning rate
+WEIGHT_DECAY = 0.001 # learning rate decay
+MOMENTUM = 0.9 # momentum for SGD optimizer
+NESTEROV = False # nesterov SGD?
 
 # +++ set the device variable
 device = 'cuda:0' if CUDA else 'cpu'
 
 # +++ setup the network
-if load_net == None: # if we're not loading a network
-    # initialize a new network!
-    model = NetworkModel(net_cfg, CUDA=CUDA)
-else: # if we are loading a network
-    netf = open(load_net, 'rb') # open the network file
-    model = torch.load(netf) # load the model
-    netf.close() # close the network file
+model = NetworkModel(NET_CFG, CUDA=CUDA)
 
 model.to(device) # send network to the right device
 model.train() # put in training mode
 
 # +++ load up them datas
 train_data = DataManager(
-    path = train_directory, 
-    class_file_path = classes_file,
-    input_dim = model.input_dim)
+    data_path = TRAIN_FILE,
+    CUDA=AUG_CUDA,
+    **DATA_AUG)
 test_data = DataManager(
-    path = test_directory, 
-    class_file_path = classes_file,
-    input_dim = model.input_dim)
+    data_path = TEST_FILE,
+    CUDA=AUG_CUDA)
 
 # +++ setup the optimizer and shit
-# optimizer = optim.SGD(
-#     model.parameters(),
-#     lr=LEARNING_RATE,
-#     momentum=0.9,
-#     weight_decay=WEIGHT_DECAY)
-optimizer = optim.Adam(
-    model.parameters(), # filter(lambda p: p.requires_grad, model.parameters()),
+optimizer = optim.SGD(
+    model.parameters(),
     lr=LEARNING_RATE,
+    momentum=MOMENTUM,
     weight_decay=WEIGHT_DECAY,
-    betas=BETAS)
+    nesterov=NESTEROV)
 
 # +++ tensorboard setup 
-writer = SummaryWriter(log_dir=tb_logdir)
+writer = SummaryWriter(log_dir=TB_LOGDIR)
+
+# +++ test network function
+def test_model():
+    # get the data and targets to test on
+    data, targets = test_data.batches()[0]
+    data, targets = data.to(device), targets.to(device)
+    
+    # test the network
+    model.eval()
+    with torch.no_grad():
+        _, loss = model(data, targets=targets)
+    model.train()
+    
+    # return the loss
+    return loss.item()
 
 # +++ log metrics function
 def log_metrics(step):
+    metrics = model.metrics # get the metrics
     # +++ first, plotting the metrics collected by the model
     plots = [
         ('loss', 'loss'),
-        ('loss breakdown', ('bbox-loss','conf-loss','cls-loss')),
+        ('loss breakdown', ('bbox-loss', 'obj-conf-loss', 'noobj-conf-loss', 'cls-loss')),
         ('confidence', ('conf-obj', 'conf-noobj')),
         ('class accuracy', 'cls-accuracy'),
         ('percent correct detections', ('recall50', 'recall75')),
         ('precision', 'precision')]
     
-    metrics = model.metrics # get the metrics
     for plot_name, plot_keys in plots:
         if isinstance(plot_keys, str): 
             # single value plot
@@ -99,40 +109,38 @@ def log_metrics(step):
             # multivalue plot
             plot_dict = dict([(k, metrics[k]) for k in plot_keys])
             writer.add_scalars(plot_name, plot_dict, global_step=step)
-    model.reset_metrics() # reset the model's metrics
     
-    # +++ now, we test the model on the test data
-    data, targets = test_data.batches()[0] # get the test batch
-    data, targets = data.to(device), targets.to(device)
+    # +++ make the class accuracy by class
+    cls_acc_bd = list(metrics['cls-acc-by-cls'])
+    plot_data = dict(zip(train_data.classes, cls_acc_bd))
+    writer.add_scalars('class accuracy by class', plot_data, global_step=step)
 
-    with torch.no_grad(): # don't track gradients
-        model.eval() # put in evaluation mode
-        _, loss =  model(data, targets=targets) # get the loss of the model
-        model.train() # put back in train mode
-    loss = loss.cpu().item() # get the float loss
+    loss = test_model()
 
     writer.add_scalar('test loss', loss, global_step=step) # add it to tensorboard
+
+    # +++ and lastly, reset the model's metrics
+    model.reset_metrics() # reset the model's metrics
 
 # +++ main training loop
 for epoch in tqdm(range(1, NUM_EPOCHS+1), 'training'):
 
     # +++ loop through batches in this epoch
-    for batch in train_data.batches(BATCH_SIZE, MINI_BATCH_SIZE, MOSAICS):
-
+    for batch in train_data.batches(batch_size=BATCH_SIZE, mini_batch_size=MINI_BATCH_SIZE):
         model.zero_grad() # zero the model's gradients
+
         batch_loss = 0. # batch loss
 
-        # +++ loop through minibatches in the batch
-        for x, targets in batch:
+        for x, y in batch:
             x = x.to(device) # send x to right device
-            targets = targets.to(device) # send targets to the right device
-            _, loss = model(x, targets=targets) # feed through the network
-            batch_loss += loss # add the loss to the batch loss
+            y = y.to(device) # send targets to the right device
 
+            _, mini_batch_loss = model(x, targets=y) # feed through the network
+            batch_loss += mini_batch_loss
+        
         batch_loss.backward() # backpropogate all batch loss
-
         optimizer.step() # take a step with the optimizer
-    
+
     # +++ check if we should write data now!
     if epoch % WRITE_EVERY == 0:
         log_metrics(epoch) # log the metrics for this epoch
@@ -140,6 +148,18 @@ for epoch in tqdm(range(1, NUM_EPOCHS+1), 'training'):
     # +++ update the dropblocks
     model.set_db_kp(epoch / (NUM_EPOCHS - 1))
 
-f = open(save_net, 'wb')
+# +++ lastly, test the model and print out the final metrics
+model.reset_metrics()
+test_model()
+metrics = model.metrics
+
+print('training complete. final test metrics are:')
+model.print_metrics()
+
+model.reset_metrics()
+model.eval()
+
+# +++ save the model
+f = open(SAVE_NET, 'wb')
 torch.save(model, f)
 f.close()

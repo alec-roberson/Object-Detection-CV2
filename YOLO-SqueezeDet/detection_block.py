@@ -5,10 +5,6 @@ assembled from the config files.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from util import make_tup, wh_iou_mat, bbox_xywh_ious
-
-# +++ custom activation functions
-
 
 # +++ global functions
 def get_activ(activation):
@@ -33,8 +29,103 @@ def get_activ(activation):
         act = nn.Identity()
     return act
 
-# +++ network block classes
+def wh_iou_mat(box_wh1, box_wh2):
+    ''' +++ INTERNAL FUNCTION +++ 
+    this function creates a matrix of IOU values between two sets of box widths
+    and heights, assuming that they share a center.
 
+    --- args ---
+    box_wh1 : torch.Tensor of shape (num_boxes1, 2)
+        the first set of box widths and heights.
+    targets : torch.Tensor of shape (num_boxes2, 2)
+        the second set of box widths and heights.
+    
+    --- returns ---
+    torch.Tensor of shape (num_boxes1, num_boxes2) : the IOUs for each 
+        combination of anchor box and target box, where the index [i,j] 
+        corresponds to the ith anchor box and jth target box given.
+    '''
+    # make copies of the tensors
+    box_wh1 = box_wh1.clone().float()
+    box_wh2 = box_wh2.clone().float()
+
+    # unpack the inputs
+    bx1_w, bx1_h = box_wh1[:,0], box_wh1[:,1]
+    bx2_w, bx2_h = box_wh2[:,0], box_wh2[:,1]
+
+    # get the areas for each anchor box/target box
+    bx1_areas, bx2_areas = torch.meshgrid(box_wh1.prod(1), box_wh2.prod(1))
+        # note: this also puts the areas in matrix format
+    
+    # calculate the intersection areas
+    int_widths = torch.min(*torch.meshgrid(bx1_w, bx2_w))
+    int_heights = torch.min(*torch.meshgrid(bx1_h, bx2_h))
+    intersect_areas = int_widths * int_heights
+    
+    # calculate union areas
+    union_areas = bx1_areas + bx2_areas - intersect_areas
+
+    # return intersect over union
+    return intersect_areas/union_areas
+
+def bbox_xywh_ious(boxes1, boxes2):
+    ''' +++ INTERNAL FUNCTION +++ 
+    takes in two sets of boxes and computes their IOUs with one-another.
+    
+    --- args ---
+    boxes1 : torch.Tensor of shape (num_boxes, 4)
+        the first set of boxes, with the first dimension corresponding to
+        (center_x, center_y, width, height).
+    boxes2 : torch.Tensor of shape (num_boxes, 4)
+        the second set of boxes, with the same formatting as boxes1.
+    '''
+    # +++ get number of boxes
+    nbs = boxes1.size(0)
+    assert nbs == boxes2.size(0)
+
+    # +++ first step is to get the corner coordinates for each box
+    bxcs1 = bbox_xywh_getcs(boxes1)
+    bxcs2 = bbox_xywh_getcs(boxes2)
+
+    # +++ find the corner coordinates of the intersection boxes
+    int_bx_cs = torch.zeros((nbs, 4)).to(boxes1.device)
+    
+    int_bx_cs[:,:2] = torch.max(bxcs1, bxcs2)[:,:2] # use max of the first
+        # corner coordinates to get it for intersection
+    int_bx_cs[:,2:] = torch.min(bxcs1, bxcs2)[:,2:] # use min of the second
+        # corner coordinates to get it for intersection
+    
+    # +++ calculate intersection area
+    int_w = int_bx_cs[:,2] - int_bx_cs[:,0] # intersection widths
+    int_h = int_bx_cs[:,3] - int_bx_cs[:,1] # intersection heights
+    int_w = torch.clamp(int_w, 0) # no boxes with negative widths
+    int_h = torch.clamp(int_h, 0) # or negative heights
+    int_A = int_w * int_h # intersection areas
+
+    # +++ calculate union areas
+    bxs1_A = boxes1[:,2:].prod(1) # boxes1 areas (width*height)
+    bxs2_A = boxes2[:,2:].prod(1) # boxes2 areas
+    union_A = bxs1_A + bxs2_A - int_A # union areas
+
+    # return intersection over union
+    return int_A / union_A
+
+# +++ EXAMPLE BLOCK_DICT
+block_dict = {
+    'layer_num': 0,
+    'type': 'detection',
+    'name': 'foo',
+    'anchors': [[12, 26], [14, 29], [15, 34]], # DONT USE THESE FUCK I NEED TO FIGURE THIS OUT FOR THE DATA
+    'ignore_thresh': 0.7,
+    'lambda_bbox': 1.0,
+    'lambda_noobj': 1.00,
+    'lambda_obj': 1.0,
+    'lambda_cls': 1.0,
+    'input_dim': 256,
+    'classes': 21,
+    'lbl_smoothing': 0.05}
+
+# +++ network block classes
 class DetBlock(nn.Module):
     ''' detection block
     a detection block is at the core of both YOLO and SqueezeDet architectures.
@@ -360,299 +451,3 @@ class DetBlock(nn.Module):
         return obj_mask, noobj_mask, txywh, tcls, tconf, correct_cls, iou_scores
 
     # +++ end of YoloBlock class
-
-class ConvolutionalBlock(nn.Sequential):
-    ''' convolutional network block
-    a convolutional block applies convolution (obviously), along with an 
-    activation function and batch normalization, as those are provided.
-
-    --- args ---
-    block_dict : dict
-        the dictionary that describes this convolutional block.
-    '''
-    def __init__(self, block_dict):
-        super(ConvolutionalBlock, self).__init__() # run super init
-
-        # save the block dict and attributes
-        self.block_dict = block_dict # save block dictionary
-        self.n = block_dict['layer_num'] # save block number
-        self.type = block_dict['type'] # save block type
-
-        # make the convolutional part
-        conv = nn.Conv2d(
-            block_dict['in_channels'], 
-            block_dict['filters'], 
-            kernel_size = block_dict['kernel_size'],
-            stride = block_dict['stride'],
-            padding = block_dict['padding'],
-            bias = block_dict['bias'])
-
-        # add conv part to the module
-        self.add_module('convolution', conv)
-
-        # maybe make and add batch normalization
-        if block_dict['batch_normalize']:
-            batch_norm = nn.BatchNorm2d(block_dict['filters']) # make the part
-            self.add_module('batch norm', batch_norm) # add it
-        
-        # add the activation function
-        activation = get_activ(block_dict['activation'])
-        self.add_module(block_dict['activation'], activation)
-
-class FireBlock(nn.Module):
-    ''' fire block
-    this is a fire block as described in the paper for sqeeze net.
-    
-    --- args ---
-    block_dict : dict
-        the config block dictionary.
-    '''
-    def __init__(self, block_dict):
-        super(FireBlock, self).__init__() # run super init
-        # unpack input
-        self.n = block_dict['layer_num'] # save layer number
-        in_chan = block_dict['in_channels']
-        fs = block_dict['fsqueeze']
-        fe = block_dict['fexpand']
-        
-        # make the layers of the module
-        self.squeeze = nn.Conv2d(in_chan, fs, kernel_size=1)
-        self.expand1 = nn.Conv2d(fs, fe, 1)
-        self.expand3 = nn.Conv2d(fs, fe, 3, padding=1)
-
-        # batch normalization
-        if block_dict['batch_normalize']:
-            self.batch_norm = nn.BatchNorm2d(fe * 2)
-        else:
-            self.batch_norm = None
-        
-        # get the activation function to use
-        self.activ = get_activ(block_dict['activation'])
-    
-    def forward(self, x):
-        s = self.activ(self.squeeze(x)) # squeeze x
-        e1 = self.activ(self.expand1(s)) # expand 1
-        e3 = self.activ(self.expand3(s)) # expand 3
-        output = torch.cat((e1, e3), dim=1) # concatenate expand layers
-        if self.batch_norm != None:
-            output = self.batch_norm(output)
-        return output
-
-class MaxPoolBlock(nn.Module):
-    ''' max pooling block
-    a block of the network that performs max pooling.
-
-    --- args ---
-    block_dict : dict
-        the dictionary that describes this max pooling block. should contain 
-        keys like 'kernel_size', 'stride', and 'padding'.
-    '''
-    def __init__(self, block_dict):
-        super(MaxPoolBlock, self).__init__() # super init
-
-        # save the block dict and attributes
-        self.block_dict = block_dict # save block dictionary
-        self.n = block_dict['layer_num'] # save block number
-        self.type = block_dict['type'] # save block type
-
-        # save the given variables
-        self.kernel_size = block_dict['kernel_size']
-        self.stride = block_dict['stride']
-        self.padding = make_tup(block_dict['padding'], tup_len=4, expand_method=1)
-
-    def forward(self, x):
-        return F.max_pool2d(
-            F.pad(
-                x, 
-                pad = self.padding,
-                mode = 'replicate'),
-            kernel_size = self.kernel_size,
-            stride = self.stride)
-    
-class UpsampleBlock(nn.Upsample):
-    ''' upsample block
-    a network block that performs upsampling.
-    
-    --- args ---
-    block_dict : dict
-        the dictionary that describes this block. should have key 
-        'scale_factor'.
-    '''
-    def __init__(self, block_dict):
-        # initialize urself
-        super(UpsampleBlock, self).__init__(
-            scale_factor = block_dict['scale_factor'],
-            mode = 'bilinear',
-            align_corners = False)
-        
-        # save the block dict and attributes
-        self.block_dict = block_dict # save block dictionary
-        self.n = block_dict['layer_num'] # save block number
-        self.type = block_dict['type'] # save block type
-    
-class RouteBlock(nn.Module):
-    ''' route block
-    a block of the network that performs routing.
-
-    --- args ---
-    block_dict : dict
-        the dictionary that describes this routing block. should have key 
-        'layers'.
-    '''
-    def __init__(self, block_dict):
-        super(RouteBlock, self).__init__() # super init
-
-        # save the block dict and attributes
-        self.block_dict = block_dict # save block dictionary
-        self.n = block_dict['layer_num'] # save block number
-        self.type = block_dict['type'] # save block type
-
-        # save routing layer numbers
-        self.layers = block_dict['layers']
-    
-    def forward(self, layer_activations):
-        # keep only the ones we want to route together
-        to_route = [layer_activations[i] for i in self.layers]
-        return torch.cat(to_route, dim=1)
-
-class ShortcutBlock(nn.Module):
-    ''' shortcut block
-    a block that describes a shortcut in the network.
-    
-    --- args ---
-    block_dict : dict
-        the dictionary that describes this block of the network. should have key
-        'from'.
-    '''
-    def __init__(self, block_dict):
-        super(ShortcutBlock, self).__init__() # super init
-        
-        # save the block dict and attributes
-        self.block_dict = block_dict # save block dictionary
-        self.n = block_dict['layer_num'] # save block number
-        self.type = block_dict['type'] # save block type
-
-        # save layer to shortcut from
-        self.layer = block_dict['from']
-    
-    def forward(self, *layer_activations):
-        return sum(layer_activations)
-
-class DropBlock2D(nn.Module):
-    ''' dropblock layer 
-    a dropblock layer performs dropblock on the incoming data, if and only if
-    the model is in training mode.
-
-    --- args ---
-    block_size : int
-        the (square) size of blocks that will be dropped.
-    keep_prob : float between 0 and 1
-        the probablility that a certain cell will be kept after going through
-        this layer. this can be modified later by setting keep_prob.
-    '''
-    def __init__(self, block_dict):
-        super(DropBlock2D, self).__init__() # run super init
-
-        # save the input variables
-        self.n = block_dict['layer_num']
-        self.block_size = block_dict['block_size']
-        self.target_keep_prob = block_dict['target_keep_prob']
-        self.init_keep_prob = block_dict['init_keep_prob']
-        self.keep_prob = block_dict['init_keep_prob']
-
-    def set_kp(self, pct):
-        ''' set keep prob method
-
-        --- args ---
-        pct : float between 0 and 1, optional (defualt=0)
-            the percent through training that we are currently
-        '''
-        self.keep_prob = self.init_keep_prob + \
-            pct * (self.target_keep_prob - self.init_keep_prob)
-    
-    def forward(self, x):
-        ''' feed a batch x through the module 
-        note that this module will only affect the output if it's in training 
-        mode. if its in evaluation mode, it will just return the input.
-        
-        --- args ---
-        x : torch.tensor
-            the input to the layer.
-        '''
-        # +++ first, make sure we're training
-        if self.training == False: # if we're not training DO NOTHING
-            return x
-
-        # +++ get info about the x tensor
-        device = x.device
-        batch_size, n_feats, height, width = x.size()
-
-        # +++ since we are training, we need to make the mask and shit
-        gamma = (1 - self.keep_prob) / self.block_size ** 2 # calculate the gamma value
-
-        mask = torch.rand((batch_size, 1, height, width)) # random array
-        mask = (mask < gamma).float() # keep only ones < gamma
-        mask = mask.to(device) # send to same device as x
-
-        # +++ now we need to make the mask into a block mask
-        bmask = F.max_pool2d(
-            input=mask,
-            kernel_size=self.block_size,
-            stride=1,
-            padding=self.block_size//2)
-        
-        if self.block_size % 2 == 0: # if it's an even block size
-            bmask = bmask[:,:,:-1,:-1] # sluff off a bit of the edges
-        
-        bmask = 1 - bmask # flip 1s and 0s
-
-        # +++ apply the block mask to the input
-        out = x * bmask
-
-        # +++ scale the output
-        out = out * (bmask.numel() / bmask.sum())
-
-        return out
-
-# +++ net blocks dictionary
-NET_BLOCKS = {
-    'convolutional': ConvolutionalBlock,
-    'fire': FireBlock,
-    'maxpool': MaxPoolBlock,
-    'upsample': UpsampleBlock,
-    'route': RouteBlock,
-    'shortcut': ShortcutBlock,
-    'dropblock': DropBlock2D}
-
-# +++ TESTING CODE
-if __name__ == '__main__':
-    from datamanager.datamanager import DataManager
-    classes = 12
-    n_anchors = 3
-    batch_size = 1
-
-    block_dict = {
-        'layer_num': 24,
-        'type': 'detection',
-        'name': 'det2-24',
-        'anchors': [[12, 26], [14, 29], [15, 34]],
-        'ignore_thresh': 0.7,
-        'lambda_bbox': 5.0,
-        'lambda_noobj': 0.5,
-        'lambda_obj': 1.0,
-        'lambda_cls': 1.0,
-        'loss_reduction': 'sum',
-        'input_dim': 256,
-        'classes': 12,
-        'lbl_smoothing': 0.05}
-    
-    dm = DataManager('test-data', 256)
-    batches = dm.batches(batch_size=batch_size, shuffle=False)
-    _, y = batches[5]
-    y = y.cuda()
-    x = torch.randn((batch_size, (5+classes)*n_anchors, 8, 8)).cuda()
-
-    detb = DetBlock(block_dict, CUDA=True)
-    o, l  = detb(x, targets=y)
-
-    

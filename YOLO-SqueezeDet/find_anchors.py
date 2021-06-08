@@ -6,9 +6,8 @@ to be prior to yolo detection.
 import os
 import argparse
 import torch
-import numpy as np
 from sklearn.cluster import KMeans
-from datamanager import DataManager
+from datamanager import load_labels
 
 if __name__ == '__main__':
     # +++ parse arguments
@@ -26,20 +25,19 @@ if __name__ == '__main__':
     file_names = os.listdir(data_path) # get all the files in the directory
     
     # +++ loop to get the all the labels
-    all_labels = []
+    label_names = []
     for fname in file_names:
         ### make sure this file is a label
-        _, ext = DataManager._get_file_info(fname) # get the extension
+        ext = fname.split('.')[-1]
         if ext != 'txt': # if it's not a text file
             continue # skip it
-
-        ### get the label
-        lbl = DataManager._get_label(data_path, fname) # get the label
-        all_labels.append(lbl) # add it to the list
+        else:
+            label_names.append(fname[:-1-len(ext)])
     
-    all_labels = torch.cat(all_labels, dim=0) # stack em all into one tensor
-    whdata = all_labels[:,-2:] # keep only the width and height data
-    whdata *= args.input_dim # multiply by the input dimension of the image
+    all_labels = list(load_labels(data_path, label_names).reshape(-1))
+    all_labels = torch.cat(all_labels, dim=0) # stack together
+    whdata = all_labels[:,-2:] # width and height data
+    whdata *= args.input_dim # make units pixels
 
     # +++ do kmeans
     kmeans = KMeans(n_clusters=args.num_anchors, n_init=10)
