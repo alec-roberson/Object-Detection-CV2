@@ -1,0 +1,37 @@
+tensorboard-metrics.txt
+
+this file contains a brief explanation of the metrics that are graphed in 
+tensorboard during training.
+
++++ NOTE +++
+    all statistics are calculated for EACH yolo "detection" layer, and averaged over the number of yolo layers AND number of batches. this means that when you look at (say) loss, you're really seeing the loss per yolo layer per batch, so increasing the batch size for instance will increase the loss, even though the performance of the network remains the same.
+
++++ CLASS ACCURACY +++ 
+    this plots class accuracy, which is calculated as being the number of correct class predictions for each cell/anchor box that was responsible for finding an object in that cell, divided by the total number of objects that should have been detected.
+* important notes:
+    this says NOTHING about how well it fit bounding boxes to objects or how confident it was about an object even being there, it is ONLY tracking how well it is predicting classes.
+
++++ CONFIDENCE +++
+    there are two lines for this plot, one is the average confidence value of
+    the network in cells/anchor boxes where there was an object present, this
+    should increase towards 1 as training progresses. the second is the average
+    confidence value where there was no object present, which should go towards
+    0 as training progresses.
+
++++ LOSS +++
+    the average loss per yolo layer per batch.
+
++++ LOSS BREAKDOWN +++
+    pretty self explanatory -- the breakdown of (scaled) losses for the network. lines include x-loss, y-loss, w-loss, h-loss, conf-loss, and cls-loss.
+
++++ NOTE : DETECTIONS +++
+    for the following metrics, an object is classified as "detected" if the network had a confidence value > 0.5 and correctly predicted the class.
+
++++ PERCENT CORRECT DETECTIONS +++
+    this tracks how well the network is doing at detecting objects. there are two lines that are tracking simmilar things. they are both calculated by taking all the objects that were detected and asking what percent of them had an IoU > some threshold. for the first line (recall50) this threshold is 0.5. for the second (recall75) it's 0.75.
+
++++ PRECISION +++
+    this tracks how precise the network is being in it's detections. it is calculated as the number of objects detected with an IoU > 0.5 divided by the number of bounding boxes that the network gave a confidence of > 0.5 to. if the network is just guessing a shit ton of random boxes, this value would drop close to zero. if instead it's only guessing the exactly right boxes, it will be 1.
+
++++ TEST LOSS +++
+    this is just the loss of the network on the test set of data. this is included because if training goes on too long, the network will start to memorize the dataset. this can be seen when the training loss of the network continues to fall while the test loss of the network increases - it is doing better on the specific cases of the dataset, but worse on the general cases in the test set. 
