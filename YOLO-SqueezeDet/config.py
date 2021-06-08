@@ -21,7 +21,8 @@ RENAME_ARGS = {
         'fs': 'fsqueeze',
         'fe': 'fexpand'},
     'maxpool': {
-        'size': 'kernel_size'},
+        'size': 'kernel_size',
+        'pad': 'padding'},
     'upsample': {
         'stride': 'scale_factor'},
     'route': {
@@ -47,8 +48,9 @@ DEFAULT_ARGS = {
         'stride': None,
         'padding': None,
         'activation': 'linear',
-        'bias': 'not block["batch_normalize"]'},
+        'bias': True},
     'fire' : {
+        'batch_normalize': False,
         'fsqueeze': None,
         'fexpand': None, 
         'activation': 'relu'},
@@ -84,11 +86,13 @@ DEFAULT_ARGS = {
     'detection': {
         'anchors': None,
         'mask': None,
-        'ignore_thresh': None,
+        'ignore_thresh': 0.7,
         'lambda_obj': 1.,
         'lambda_noobj': 100.,
         'lambda_bbox': 1.,
-        'lambda_cls': 1.}}
+        'lambda_cls': 1.,
+        'loss_reduction': 'sum',
+        'lbl_smoothing': 0.05}}
 
 
 # +++ functions
@@ -218,12 +222,6 @@ def read_cfg(configFile):
         # loop to set defaults
         for arg in block_args:
             default = block_args[arg] # get the default value
-            ### try to evaluate the default arg (if an expression)
-            try:
-                default = eval(default)
-            except: 
-                # if it doesn't evaluate to anything
-                pass # don't do anything
             
             ### cases for default arg substitution
             if arg in block: # the block already has the argument

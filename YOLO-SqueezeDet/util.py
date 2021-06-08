@@ -329,6 +329,28 @@ def bbox_IoU(box, boxes):
 
     return iou
 
+def c1c2_iou_mat(boxes1, boxes2):
+    x11, y11, x12, y12 = boxes1.t()
+    x21, y21, x22, y22 = boxes2.t()
+
+    bx1_area, bx2_area = torch.meshgrid((x12-x11)*(y12-y11),
+                                        (x22-x21)*(y22-y21))
+
+    ix1 = torch.max(*torch.meshgrid(x11, x21))
+    iy1 = torch.max(*torch.meshgrid(y11, y21))
+    ix2 = torch.min(*torch.meshgrid(x12, x22))
+    iy2 = torch.min(*torch.meshgrid(y12, y22))
+
+    iw = ix2 - ix1
+    ih = iy2 - iy1
+    int_area = (iw * ih) * (iw > 0) * (ih > 0)
+
+    union_area = bx1_area + bx2_area - int_area
+    
+    iou_mat = int_area / union_area
+
+    return iou_mat
+
 def nms_prediction(prediction, nms_thresh=0.4):
     ''' +++ INTERNAL FUNCTION +++
     does nms on the prediction coming from get_results.
@@ -458,7 +480,47 @@ def get_results(prediction, conf_thresh, num_classes, nms=True, nms_thresh=0.4):
                 output = torch.cat((output, image_pred_class), 0) # add it to the end
     
     return output
-            
+
+def wh_iou_mat(box_wh1, box_wh2):
+    ''' +++ INTERNAL FUNCTION +++ 
+    this function creates a matrix of IOU values between two sets of box widths
+    and heights, assuming that they share a center.
+
+    --- args ---
+    box_wh1 : torch.Tensor of shape (num_boxes1, 2)
+        the first set of box widths and heights.
+    targets : torch.Tensor of shape (num_boxes2, 2)
+        the second set of box widths and heights.
+    
+    --- returns ---
+    torch.Tensor of shape (num_boxes1, num_boxes2) : the IOUs for each 
+        combination of anchor box and target box, where the index [i,j] 
+        corresponds to the ith anchor box and jth target box given.
+    '''
+    # make copies of the tensors
+    box_wh1 = box_wh1.clone().float()
+    box_wh2 = box_wh2.clone().float()
+
+    # unpack the inputs
+    bx1_w, bx1_h = box_wh1[:,0], box_wh1[:,1]
+    bx2_w, bx2_h = box_wh2[:,0], box_wh2[:,1]
+
+    # get the areas for each anchor box/target box
+    bx1_areas, bx2_areas = torch.meshgrid(box_wh1.prod(1), box_wh2.prod(1))
+        # note: this also puts the areas in matrix format
+    
+    # calculate the intersection areas
+    int_widths = torch.min(*torch.meshgrid(bx1_w, bx2_w))
+    int_heights = torch.min(*torch.meshgrid(bx1_h, bx2_h))
+    intersect_areas = int_widths * int_heights
+    
+    # calculate union areas
+    union_areas = bx1_areas + bx2_areas - intersect_areas
+
+    # return intersect over union
+    return intersect_areas/union_areas
+
+# FIXME: REMOVE THIS FUNCTION
 def bbox_wh_iou(anchors, targets):
     ''' +++ INTERNAL FUNCTION +++ 
     this function calculates the IOU of a set of anchor boxes and target boxes,
@@ -475,6 +537,7 @@ def bbox_wh_iou(anchors, targets):
         combination of anchor box and target box, where the index [i,j] 
         corresponds to the ith anchor box and jth target box given.
     '''
+    print('bbox_wh_iou FUNCTION IS DEPRICIATED')
     # make float copies of the tensors
     anchors = anchors.clone().float()
     targets = targets.clone().float()
@@ -523,6 +586,7 @@ def bbox_xywh_ious(boxes1, boxes2):
 
     # +++ find the corner coordinates of the intersection boxes
     int_bx_cs = torch.zeros((nbs, 4)).to(boxes1.device)
+    
     int_bx_cs[:,:2] = torch.max(bxcs1, bxcs2)[:,:2] # use max of the first
         # corner coordinates to get it for intersection
     int_bx_cs[:,2:] = torch.min(bxcs1, bxcs2)[:,2:] # use min of the second
