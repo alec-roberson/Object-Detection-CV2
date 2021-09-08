@@ -11,8 +11,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from .datamanager import DataManager
 
-# set the backend
-matplotlib.use("Qt5agg")
+# # set the backend
+# matplotlib.use("Qt5agg")
 
 # +++ FUNCTIONS
 def load_classes(class_file):

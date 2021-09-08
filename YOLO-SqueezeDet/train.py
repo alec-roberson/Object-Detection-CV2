@@ -13,30 +13,30 @@ from datamanager import DataManager
 
 
 # +++ file locations
-NET_CFG = 'cfg/yolov3-mid-416.cfg' # 'cfg/squeezedet.cfg' # network configuration file
-TRAIN_FILE = 'data/train-data-t-416.pt' # training images/labels directory
-TEST_FILE = 'data/test-data-t-416.pt' # testing images/labels directory
-NET_NAME = 'yv3m-t-416-0' # where to save the network after training
+NET_CFG = 'cfg/yolov3-mid-256.cfg' # 'cfg/squeezedet.cfg' # network configuration file
+TRAIN_FILE = 'T-test-256.pt' # training images/labels directory
+TEST_FILE = 'T-test-256.pt' # testing images/labels directory
+NET_NAME = 'TESTING-yv3m-256' # where to save the network after training
 TB_LOGDIR = 'runs/' + NET_NAME # log for tensorboard
 SAVE_NET = NET_NAME + '.pt' # file to save net to
 
 # +++ data preferences
-BATCH_SIZE = 32 # batch size
-MINI_BATCH_SIZE = 32 # mini batch size
-AUG_CUDA = True # should data be used for data augmentation
-DATA_AUG = {
-    'mosaics': 0.25,
-    'mixup': 0.25,
-    'cutmix': 0.25,
-    'cutout': 0.25,
-    'hflip': 0.25,
-    'vflip': 0.25,
-    'rot': 0.25
-}
+BATCH_SIZE = 10 # batch size
+MINI_BATCH_SIZE = 10 # mini batch size
+AUG_CUDA = False # should data be used for data augmentation
+DATA_AUG = {}
+#     'mosaics': 0.25,
+#     'mixup': 0.25,
+#     'cutmix': 0.25,
+#     'cutout': 0.25,
+#     'hflip': 0.25,
+#     'vflip': 0.25,
+#     'rot': 0.25
+# }
 
 # +++ training prefrences
-CUDA = True # should cuda be used for the network
-NUM_EPOCHS = 500 # number of epochs to run for
+CUDA = False # should cuda be used for the network
+NUM_EPOCHS = 10 # number of epochs to run for
 WRITE_EVERY = 1 # tensorboard data will be written every ___ epochs
 
 # +++ optimizer prefrences

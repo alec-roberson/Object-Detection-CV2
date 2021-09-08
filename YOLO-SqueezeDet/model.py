@@ -34,9 +34,9 @@ class NetworkModel(nn.Module):
         self.CUDA = CUDA # should cuda be used
 
         # +++ setup the network
-        self.reset_metrics() # setup the metric dictionary
         self.netblocks = read_cfg(cfgfile) # read config file
         self._build_network() # build the network from the config file
+        self.reset_metrics() # setup the metric dictionary
 
     def _build_network(self):
         ''' +++ INTERNAL METHOD +++
@@ -203,7 +203,7 @@ class NetworkModel(nn.Module):
             a prefix that will be attached to the start of everything printed.
         '''
         # +++ setup
-        metrics = self.metrics()
+        metrics = self.metrics
         if classes is None:
             classes = [str(i) for i in range(self.num_classes)]
         

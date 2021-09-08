@@ -2,22 +2,31 @@
 # from datamanager import DataParser
 import random
 from datamanager import *
+from detector import Detector
 import torch
 import time
 import copy
 
-data_aug = {
-    'mosaics': 0.25,
-    'mixup': 0.25,
-    'cutmix': 0.25,
-    'cutout': 0.25,
-    'hflip': 0.25,
-    'vflip': 0.25,
-    'rot': 0.25}
+det = Detector('TESTING-yv3m-256.pt')
 
-dm = DataManager('data/trimmed/train-data-416.pt', CUDA=True, **data_aug)
+# data_aug = {
+#     'mosaics': 0.25,
+#     'mixup': 0.25,
+#     'cutmix': 0.25,
+#     'cutout': 0.25,
+#     'hflip': 0.25,
+#     'vflip': 0.25,
+#     'rot': 0.25}
 
-dm.premake_batches('TRD-evenaug-416', 1500, batch_size=64, mini_batch_size=32, shuffle=True, augmented=True)
+# THIS IS TO DO SOME STUFF
+# dp = DataParser('data-test', 'class-names.txt', 256)
+# dp.save('T-train-256', 'T-test-256')
+
+
+
+# dm = DataManager('data/trimmed/train-data-416.pt', CUDA=True, **data_aug)
+
+# dm.premake_batches('TRD-evenaug-416', 1500, batch_size=64, mini_batch_size=32, shuffle=True, augmented=True)
 
 # data_aug = {
 #     'mosaics': 0.25,
@@ -57,6 +66,7 @@ dm.premake_batches('TRD-evenaug-416', 1500, batch_size=64, mini_batch_size=32, s
 #     i = random.randint(0, len(dimgs)-1)
 #     show_img(dimgs[i])
 
+# dm = DataManager('T-train-256.pt')
 
 
 '''
