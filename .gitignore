@@ -1,0 +1,6 @@
+__pycache__
+YOLO-SqueezeDet/__pycache__
+YOLO-SqueezeDet/data
+YOLO-SqueezeDet/data-test
+YOLO-SqueezeDet/runs
+YOLO-SqueezeDet/*.pt
