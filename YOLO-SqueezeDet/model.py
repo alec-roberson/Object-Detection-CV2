@@ -7,9 +7,9 @@ be changed on the fly.
 last updated 01/09/2021
 '''
 
-import torch 
-import torch.nn as nn
 import copy
+import torch
+import torch.nn as nn
 
 # from util import * # import utility functions
 # from util import *

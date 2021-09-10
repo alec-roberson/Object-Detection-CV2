@@ -140,7 +140,7 @@ class Detector(object):
         y_center = predictions[...,1].clone()
         width = predictions[...,2].clone()
         height = predictions[...,3].clone()
-        
+
         predictions[...,0] = x_center - width/2
         predictions[...,1] = y_center - height/2
         predictions[...,2] = x_center + width/2

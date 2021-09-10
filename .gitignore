@@ -1,4 +1,5 @@
 __pycache__
+.vscode
 YOLO-SqueezeDet/__pycache__
 YOLO-SqueezeDet/data
 YOLO-SqueezeDet/data-test
